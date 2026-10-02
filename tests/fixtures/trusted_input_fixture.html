@@ -1,0 +1,222 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>trusted-input fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 24px; }
+  #stateCombo { position: relative; width: 320px; margin-top: 40px; }
+  .x-form-field { width: 260px; height: 26px; border: 1px solid #888; padding: 2px 6px; }
+  .x-form-trigger { display:inline-block; width: 20px; height: 30px; border:1px solid #888;
+                    text-align:center; cursor: pointer; vertical-align: top; }
+  /* Floating picker list — mirrors PropertyRadar's ExtJS boundlist: the items
+     carry NO ids and are only reachable by position or visible text. */
+  .x-boundlist { position: absolute; top: 34px; left: 0; width: 288px; max-height: 220px;
+                 overflow-y: auto; border: 1px solid #666; background: #fff; z-index: 10;
+                 list-style: none; margin: 0; padding: 0; }
+  .x-list-plain .x-boundlist-item { padding: 4px 8px; cursor: pointer; }
+  .x-list-plain .x-boundlist-item:hover { background: #d9e8fb; }
+  /* ExtJS x-mask: a modal loading overlay shown during the async store-query.
+     Covers the list area, so a click launched before it clears is intercepted. */
+  .x-mask { position: absolute; top: 34px; left: 0; width: 288px; height: 60px;
+            background: rgba(255,255,255,.85); border: 1px solid #ccc; z-index: 50;
+            display: none; align-items: center; justify-content: center; color:#666; }
+  .chips { margin-top: 70px; min-height: 20px; }
+  .chip { display:inline-block; background:#2b6cb0; color:#fff; padding:2px 8px;
+          margin:2px; border-radius: 10px; font-size: 12px; }
+  .csvitem-value { width: 74px; border: 0; color: #fff; background: transparent; }
+  .csvitem-delete { border: 0; color: #fff; background: transparent; cursor: pointer; }
+  #applyRow { margin-top: 40px; }
+  #applyBtn { padding: 8px 20px; }
+  /* "Server is in process of restart" overlay — intercepts every click. */
+  #restartOverlay { position: fixed; inset: 0; background: rgba(20,20,30,.72);
+                    color:#fff; font-size: 22px; display:none; z-index: 9999;
+                    align-items: center; justify-content: center; }
+</style>
+</head>
+<body>
+  <h3>State (ExtJS combo — id-less, async, inconsistent render)</h3>
+  <div id="stateCombo" class="fr-criteria-editor">
+    <!-- Stable class .state-input; the ID intentionally CHANGES after each
+         selection (live gotcha) so a locator pinned to the id breaks. -->
+    <input id="stateInput" class="state-input x-form-field" role="combobox" autocomplete="off" placeholder="Type a state…">
+    <div id="stateTrigger" class="x-form-trigger">▾</div>
+    <div id="stateMask" class="x-mask">Loading…</div>
+    <ul id="stateList" class="x-boundlist x-list-plain"></ul>
+    <div id="stateChips" class="x-tagfield chips"></div>
+  </div>
+
+  <h3>Geo (react-select style)</h3>
+  <div id="rsControl" class="react-select__control" style="width:288px;border:1px solid #888;padding:4px;">
+    <input id="rsInput" class="react-select__input" autocomplete="off" placeholder="Type to filter…" style="border:none;outline:none;width:260px;">
+    <ul id="rsMenu" class="react-select__menu x-list-plain" style="list-style:none;margin:6px 0 0;padding:0;border:1px solid #ccc;max-height:160px;overflow:auto;"></ul>
+  </div>
+  <div id="rsChosen" style="margin-top:6px;color:#2b6cb0;"></div>
+
+  <div id="applyRow">
+    <button id="applyBtn">Apply Saved Search</button>
+    <span id="applyStatus"></span>
+  </div>
+
+  <div id="restartOverlay">Server is in process of restart…</div>
+
+<script>
+(function () {
+  // ==== State combo: a faithful model of the LIVE PropertyRadar ExtJS combo ===
+  // Encodes the failure modes the live recipe had to defeat, so a primitive that
+  // takes a shortcut CANNOT pass here:
+  //   * The suggestion list renders ONLY after a trusted TYPE, and only after an
+  //     async store-query delay (RENDER_DELAY_MS) — a too-short wait misses it.
+  //   * Clicking the TRIGGER does NOT run the store-query: it opens an empty
+  //     picker. So a trigger-then-pick strategy finds no items (selects nothing).
+  //   * Items are id-less and register selection ONLY on a trusted native click.
+  //   * The chosen state is committed as a vCsvItem-style child INPUT VALUE. Its
+  //     textContent is only a delete glyph, while the NAME also appears in the
+  //     editable combo input/dropdown. A selector must read only readonly values
+  //     relative to one outer criteria-editor scope, or it can FALSE-PASS.
+  //   * The input's ID changes after every selection (re-fetch by a stable class).
+  //   * An x-mask covers the list during the async load; a click launched before
+  //     it clears is intercepted.
+  var RENDER_DELAY_MS = 250;
+  var STATES = ["Alabama","Alaska","Arizona","Arkansas","California","Colorado",
+                "Connecticut","Delaware","Florida","Georgia","Hawaii","Idaho",
+                "Illinois","Indiana","Iowa","Kansas"];
+  var trigger = document.getElementById('stateTrigger');
+  var list = document.getElementById('stateList');
+  var mask = document.getElementById('stateMask');
+  var chips = document.getElementById('stateChips');
+  var stateSelected = [];
+  var idSeq = 1;
+  var renderToken = 0;
+
+  function inputEl() { return document.querySelector('.state-input'); }
+  function renderChips() {
+    chips.innerHTML = '';
+    stateSelected.forEach(function (n) {
+      var s = document.createElement('span');
+      s.className = 'chip vCsvItem';
+      var value = document.createElement('input');
+      value.className = 'csvitem-value x-form-field';
+      value.value = n; value.readOnly = true; value.setAttribute('role', 'textbox');
+      var remove = document.createElement('button');
+      remove.className = 'csvitem-delete'; remove.textContent = '×';
+      s.appendChild(value); s.appendChild(remove); chips.appendChild(s);
+    });
+  }
+  function renderList(filter) {
+    list.innerHTML = '';
+    filter = (filter || '').trim().toLowerCase();
+    if (!filter) return;
+    STATES.forEach(function (name) {
+      if (name.toLowerCase().indexOf(filter) === -1) return;
+      var li = document.createElement('li');
+      li.className = 'x-boundlist-item';   // NOTE: intentionally no id
+      li.textContent = name;
+      li.addEventListener('click', function (e) {
+        if (!e.isTrusted) return;          // synthetic click swallowed
+        if (stateSelected.indexOf(name) === -1) {
+          stateSelected.push(name);
+          renderChips();
+        }
+        // Post-select: clear input, close list, and CHANGE the input id (gotcha).
+        var inp = inputEl();
+        inp.value = ''; list.innerHTML = '';
+        inp.id = 'stateInput-' + (++idSeq);
+      });
+      list.appendChild(li);
+    });
+  }
+  // A trusted keystroke triggers the async store-query: mask -> delay -> render.
+  function runStoreQuery() {
+    var q = inputEl().value;
+    var mine = ++renderToken;
+    mask.style.display = 'flex';
+    list.innerHTML = '';
+    setTimeout(function () {
+      if (mine !== renderToken) return;    // superseded by a newer keystroke
+      mask.style.display = 'none';
+      renderList(q);
+    }, RENDER_DELAY_MS);
+  }
+  // Bind on the container so the handler survives the input id changing.
+  document.getElementById('stateCombo').addEventListener('input', function (e) {
+    if (e.isTrusted && e.target.classList.contains('state-input')) runStoreQuery();
+  });
+  // The trigger opens an EMPTY picker — it does NOT run the store-query. Modeling
+  // the live finding that the trigger path reaches only the id-less container.
+  trigger.addEventListener('click', function (e) { if (e.isTrusted) { list.innerHTML = ''; } });
+
+  // ==== Apply button (trusted-gated; records last click trustedness) ==========
+  var applyBtn = document.getElementById('applyBtn');
+  var applyStatus = document.getElementById('applyStatus');
+  applyBtn.addEventListener('click', function (e) {
+    window.__applyClick = { isTrusted: e.isTrusted };
+    if (e.isTrusted) { applyStatus.textContent = 'applied'; }
+  });
+
+  // ==== Geo: react-select value-tracker model (unchanged) =====================
+  var GEO = ["Anchorage","Atlanta","Austin","Boston","Chicago","Dallas",
+             "Denver","Houston","Miami","Orlando","Phoenix","Seattle"];
+  var rsInput = document.getElementById('rsInput');
+  var rsMenu = document.getElementById('rsMenu');
+  var rsChosen = document.getElementById('rsChosen');
+  var desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(rsInput), 'value');
+  var tracked = desc.get.call(rsInput);
+  Object.defineProperty(rsInput, 'value', {
+    configurable: true,
+    get: function () { return desc.get.call(this); },
+    set: function (v) { tracked = v; desc.set.call(this, v); }  // JS-set syncs tracker
+  });
+  function rsFilter(q) {
+    q = (q || '').trim().toLowerCase();
+    rsMenu.innerHTML = '';
+    if (!q) return;
+    GEO.forEach(function (name) {
+      if (name.toLowerCase().indexOf(q) === -1) return;
+      var li = document.createElement('li');
+      li.className = 'react-select__option x-boundlist-item';  // no id
+      li.textContent = name;
+      li.style.padding = '3px 8px'; li.style.cursor = 'pointer';
+      li.addEventListener('click', function (e) {
+        if (!e.isTrusted) return;
+        rsChosen.textContent = 'geo: ' + name;
+        rsInput.value = ''; rsMenu.innerHTML = '';
+      });
+      rsMenu.appendChild(li);
+    });
+  }
+  rsInput.addEventListener('input', function () {
+    var cur = desc.get.call(rsInput);
+    if (cur === tracked) return;   // programmatic set already synced tracker -> React skips
+    tracked = cur;
+    rsFilter(cur);
+  });
+
+  // ==== Test hooks ============================================================
+  window.__rs = {
+    optionCount: function () { return rsMenu.querySelectorAll('.react-select__option').length; },
+    chosen: function () { return rsChosen.textContent; },
+    jsSet: function (v) { rsInput.value = v; rsInput.dispatchEvent(new Event('input', { bubbles: true })); },
+    reset: function () { rsInput.value = ''; tracked = ''; rsMenu.innerHTML = ''; rsChosen.textContent = ''; }
+  };
+  window.__fixture = {
+    selectedStates: function () { return stateSelected.slice(); },
+    stateItemCount: function () { return list.querySelectorAll('.x-boundlist-item').length; },
+    chipsText: function () { return chips.textContent; },
+    chipsValues: function () { return Array.prototype.map.call(
+      chips.querySelectorAll('input[readonly]'), function (el) { return el.value; }); },
+    maskShown: function () { return mask.style.display !== 'none' && mask.style.display !== ''; },
+    inputId: function () { var i = inputEl(); return i ? i.id : null; },
+    renderDelayMs: function () { return RENDER_DELAY_MS; },
+    showOverlay: function () { document.getElementById('restartOverlay').style.display = 'flex'; },
+    hideOverlay: function () { document.getElementById('restartOverlay').style.display = 'none'; },
+    reset: function () {
+      stateSelected = []; renderChips(); list.innerHTML = ''; mask.style.display = 'none';
+      var inp = inputEl(); if (inp) { inp.value = ''; inp.id = 'stateInput'; } idSeq = 1;
+      if (window.__rs) window.__rs.reset();
+    }
+  };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+*.log
+.DS_Store
+*.db
+auth-profile*/
+profiles/
+dashboard_token
+*.db-wal
+*.db-shm
+.venv/
+_artifacts/
+.pytest_cache/
