@@ -6,7 +6,9 @@ sessions through the Python client or HTTP API. Sessions are tracked in SQLite.
 
 ## macOS setup
 
-Install Python 3.11 or newer and Google Chrome, then from this checkout:
+Install Python 3.11–3.13 and Google Chrome, then from this checkout
+(Python 3.14 is not yet covered by some pinned dependencies' prebuilt wheels and
+would require a source build toolchain):
 
 ```sh
 python3 -m venv .venv
@@ -20,7 +22,7 @@ need a visible desktop. The server prevents idle sleep on macOS while it runs.
 
 ## WSL / Linux setup
 
-Use WSL Ubuntu with Python 3.11 or newer and its venv support, and install Google
+Use WSL Ubuntu with Python 3.11–3.13 and its venv support, and install Google
 Chrome or Chromium **inside Linux**. Follow the same venv commands above. For
 headful sessions enable WSLg or configure a desktop display. Headless mode is
 automatic when Linux/WSL has neither `DISPLAY` nor `WAYLAND_DISPLAY`. Pass
