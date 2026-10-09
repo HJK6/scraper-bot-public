@@ -29,9 +29,13 @@ MODES = frozenset({'keystroke', 'send_keys', 'insert'})
 _confidential = ContextVar('confidential_fill_diagnostics', default=False)
 
 
+def safe_primitive(value, fallback="trusted.type"):
+    return value if isinstance(value, str) and value in PRIMITIVES else fallback
+
+
 def error_detail(reason='error', primitive='trusted.type'):
     reason = reason if isinstance(reason, str) and reason in MESSAGES else 'error'
-    primitive = primitive if isinstance(primitive, str) and primitive in PRIMITIVES else 'trusted.type'
+    primitive = safe_primitive(primitive)
     return {'ok': False, 'reason': reason, 'message': MESSAGES[reason], 'primitive': primitive}
 
 

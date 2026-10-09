@@ -279,7 +279,8 @@ class ScraperBot:
                     return fd.success_detail(data, primitive)
                 status = resp.status_code
                 detail = data.get("detail") if isinstance(data, dict) else None
-                detail = fd.error_detail(detail.get("reason") if isinstance(detail, dict) else "error", primitive)
+                detail = fd.error_detail(detail.get("reason") if isinstance(detail, dict) else "error",
+                                         fd.safe_primitive(detail.get("primitive"), primitive) if isinstance(detail, dict) else primitive)
                 if status == 404:
                     error = ScraperBotSessionLost("confidential fill session not found (404)")
                 elif status in (502, 503, 504):

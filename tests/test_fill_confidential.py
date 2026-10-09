@@ -322,3 +322,21 @@ def test_explicit_network_enable_tracks_all_adapters_and_refuses_fill(endpoint):
     assert response.json()['detail']['reason'] == 'bad_request'
     assert 'Network.enable' in methods
     assert field.sent is None
+
+
+@pytest.mark.parametrize('label,value', SAMPLES, ids=[x[0] for x in SAMPLES])
+def test_selection_failure_preserves_safe_step_primitive(endpoint, monkeypatch, label, value):
+    tc, _sess, _field, _dm = endpoint
+    def refusal(*args, **kwargs):
+        raise ti.TrustedInputError('element_not_found', value, primitive='trusted.select_option.wait', nested={'value': READBACK})
+    monkeypatch.setattr(ti, 'select_option', refusal)
+    response = tc.post('/sessions/synthetic/input/select_option', json={'input_css': '#synthetic', 'item_text': value, 'verify_scope_css': '#committed'})
+    assert response.status_code == 422
+    assert response.json()['detail']['primitive'] == 'trusted.select_option.wait'
+    bot = api.ScraperBot('http://unused.invalid')
+    monkeypatch.setattr(bot._session, 'post', lambda *a, **k: Response(response.status_code, response.json()))
+    with pytest.raises(api.ScraperBotInputError) as caught:
+        bot.select_option('synthetic', input_css='#synthetic', item_text=value, verify_scope_css='#committed')
+    assert caught.value.primitive == 'trusted.select_option.wait'
+    assert caught.value.reason == 'element_not_found'
+    assert_safe([response.text, error_surfaces(caught.value)], value, READBACK)

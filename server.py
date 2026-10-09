@@ -2101,7 +2101,7 @@ async def confidential_http_error(request, error):
     if primitive:
         detail = error.detail if isinstance(error.detail, dict) else {}
         return JSONResponse(status_code=error.status_code,
-                            content={"detail": fd.error_detail(detail.get("reason", "error"), primitive)})
+                            content={"detail": fd.error_detail(detail.get("reason", "error"), fd.safe_primitive(detail.get("primitive"), primitive))})
     return await http_exception_handler(request, error)
 
 
@@ -2116,7 +2116,7 @@ def fill_endpoint(primitive):
                 except HTTPException as error:
                     status = error.status_code
                     detail = error.detail if isinstance(error.detail, dict) else {}
-                    detail = fd.error_detail(detail.get("reason", "error"), primitive)
+                    detail = fd.error_detail(detail.get("reason", "error"), fd.safe_primitive(detail.get("primitive"), primitive))
                 except Exception:
                     status, detail = 400, fd.error_detail(primitive=primitive)
             raise HTTPException(status_code=status, detail=detail) from None
