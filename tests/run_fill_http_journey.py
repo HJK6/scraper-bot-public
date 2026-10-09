@@ -25,6 +25,24 @@ SAMPLES = [('pan', '000000000000000'), ('cvv', '963'),
 HTML = '<input id="short" maxlength="2"><input id="plain">'
 
 
+
+def close_owned(bot, session, process, receipt):
+    """A close failure stays failed, but never skips owned server teardown."""
+    try:
+        if session:
+            bot.close(session)
+            receipt['owned_sessions_closed'] = 1
+    except Exception as error:
+        receipt['session_cleanup_failure'] = type(error).__name__
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        receipt['server_stopped'] = process.poll() is not None
+
 def main():
     with tempfile.TemporaryDirectory(prefix='fill-http-journey-') as data:
         with socket.socket() as sock:
@@ -83,6 +101,18 @@ def main():
                                              'mismatch_detected': mismatch_detected,
                                              'success_verified': success.get('verified') is True,
                                              'success_safe': value not in str(success)})
+                receipt['selection_cases'] = []
+                for label, value in SAMPLES:
+                    selection_html = ('<button id="trigger" onclick="document.querySelector(\'#items\').style.display=\'block\';'
+                                      'fetch(\'http://127.0.0.1:' + str(port) + '/synthetic-capture?value=' + value + '\')">Open</button>'
+                                      '<ul id="items" style="display:none"><li onclick="document.querySelector(\'#committed\').textContent=this.textContent">'
+                                      + value + '</li></ul><div id="committed">before</div>')
+                    bot.navigate(session, 'data:text/html,' + quote(selection_html))
+                    selection = bot.select_option(session, item_text=value, item_scope_css='#items', item_tag='li',
+                                                  verify_scope_css='#committed', open_via_trigger=True, trigger_css='#trigger')
+                    committed = bot.execute(session, 'return document.querySelector("#committed").textContent;')
+                    receipt['selection_cases'].append({'class': label, 'verified': selection.get('verified') is True,
+                                                       'committed': committed == value, 'success_safe': value not in str(selection)})
                 time.sleep(.2)
                 receipt['automatic_query_capture_absent'] = requests.get(bot.base+f'/synthetic-capture-check/{session}', timeout=10).json()['automatic_query_capture_absent']
                 # Explicit recording must resume on every adapter, then refuse new fills.
@@ -103,17 +133,9 @@ def main():
                 log_text = (Path(data)/'server.log').read_text() + (Path(data)/'process.log').read_text()
                 receipt['logs_safe'] = all(v not in log_text for _, v in SAMPLES)
             finally:
-                if session:
-                    bot.close(session)
-                    receipt['owned_sessions_closed'] = 1
-                process.terminate()
-                try:
-                    process.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-                receipt['server_stopped'] = process.poll() is not None
+                close_owned(bot, session, process, receipt)
             passed = all(all(v for k,v in case.items() if k!='class') for case in receipt['cases'])
+            passed = passed and len(receipt['selection_cases']) == 4 and all(all(v for k,v in c.items() if k != 'class') for c in receipt['selection_cases'])
             passed = passed and receipt['automatic_query_capture_absent'] and receipt['enabled_capture_refuses_fill'] and receipt['explicit_capture_resumes']
             passed = passed and len(receipt['cases']) == 4 and receipt.get('session_diagnostic_safe') and receipt.get('logs_safe')
             passed = passed and receipt['owned_sessions_closed'] == 1 and receipt['server_stopped']

@@ -340,3 +340,75 @@ def test_selection_failure_preserves_safe_step_primitive(endpoint, monkeypatch, 
     assert caught.value.primitive == 'trusted.select_option.wait'
     assert caught.value.reason == 'element_not_found'
     assert_safe([response.text, error_surfaces(caught.value)], value, READBACK)
+
+
+@pytest.mark.parametrize('label,value', SAMPLES, ids=[x[0] for x in SAMPLES])
+@pytest.mark.parametrize('has_input', [False, True], ids=['trigger-only', 'trigger-and-input'])
+@pytest.mark.parametrize('suppression_fails', [False, True], ids=['ordered', 'fail-closed'])
+def test_selection_capture_boundary_precedes_all_dispatch(field, monkeypatch, label, value, has_input, suppression_fails):
+    events = []
+    def cdp(method, params):
+        events.append(method)
+        if suppression_fails:
+            raise RuntimeError(value + READBACK)
+        return {}
+    field.execute_cdp_cmd = cdp
+    monkeypatch.setattr(ti, 'click', lambda *a, **k: events.append('click') or {'ok': True})
+    monkeypatch.setattr(ti, 'wait_for', lambda *a, **k: events.append('wait') or {'ok': True})
+    states = iter(['before', value])
+    monkeypatch.setattr(ti, '_scope_text', lambda *a: next(states))
+    kwargs = {'item_text': value, 'verify_scope_css': '#committed', 'open_via_trigger': True, 'trigger_css': '#trigger'}
+    if has_input:
+        kwargs['input_css'] = '#synthetic'
+    if suppression_fails:
+        with pytest.raises(ti.TrustedInputError) as caught:
+            ti.select_option(field, **kwargs)
+        assert caught.value.reason == 'error'
+        assert events == ['Network.disable']
+        assert field.sent is None
+        assert_safe(error_surfaces(caught.value), value, READBACK)
+    else:
+        result = ti.select_option(field, **kwargs)
+        assert result['verified'] is True
+        assert events[0] == 'Network.disable'
+        assert_safe(result, value, READBACK)
+
+
+@pytest.mark.parametrize('envelope', [
+    {'ok': False, 'status': 'typed', 'detail': {'reason': 'effect_not_observed'}},
+    {'status': 'typed', 'detail': {'reason': 'effect_not_observed'}},
+    {'ok': True, 'status': 'typed', 'error': 'failed'},
+    {'ok': 'false', 'status': 'typed'},
+    {'ok': True, 'reason': 'effect_not_observed'},
+], ids=['explicit-failure', 'status-and-detail', 'ok-and-error', 'wrong-ok-type', 'ok-and-reason'])
+def test_contradictory_fill_success_is_refused(monkeypatch, envelope):
+    bot = api.ScraperBot('http://unused.invalid')
+    monkeypatch.setattr(bot._session, 'post', lambda *a, **k: Response(200, envelope))
+    with pytest.raises(api.ScraperBotInputError):
+        bot.type('synthetic', 'synthetic-private', css='#synthetic')
+
+
+def test_status_only_legacy_success_is_preserved(monkeypatch):
+    bot = api.ScraperBot('http://unused.invalid')
+    monkeypatch.setattr(bot._session, 'post', lambda *a, **k: Response(200, {'status': 'typed'}))
+    assert bot.type('synthetic', 'synthetic-private', css='#synthetic')['status'] == 'typed'
+
+
+def test_close_failure_always_tears_down_owned_harness_server():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('isolated_fill_journey', Path(__file__).with_name('run_fill_http_journey.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    events = []
+    def close(_session):
+        events.append('close')
+        raise RuntimeError(READBACK)
+    process = SimpleNamespace(terminate=lambda: events.append('terminate'), wait=lambda **k: events.append('wait'), poll=lambda: 0)
+    receipt = {'owned_sessions_closed': 0}
+    module.close_owned(SimpleNamespace(close=close), 'synthetic', process, receipt)
+    assert events == ['close', 'terminate', 'wait']
+    assert receipt['owned_sessions_closed'] == 0
+    assert receipt['server_stopped'] is True
+    assert receipt['session_cleanup_failure'] == 'RuntimeError'
+    assert_safe(receipt, READBACK)

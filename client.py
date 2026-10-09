@@ -274,8 +274,10 @@ class ScraperBot:
                     data = resp.json()
                 except Exception:
                     data = None
-                if resp.ok and isinstance(data, dict) and (data.get("ok") is True or
-                        (primitive == "legacy.type" and data.get("status") == "typed")):
+                if (resp.ok and isinstance(data, dict)
+                        and not any(key in data for key in ("detail", "error", "reason"))
+                        and (data.get("ok") is True or
+                             (primitive == "legacy.type" and "ok" not in data and data.get("status") == "typed"))):
                     return fd.success_detail(data, primitive)
                 status = resp.status_code
                 detail = data.get("detail") if isinstance(data, dict) else None

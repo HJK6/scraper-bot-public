@@ -771,6 +771,7 @@ def select_option(driver, *, input_css: str = None, input_xpath: str = None,
                                 "select_option needs input_css/input_xpath to type into "
                                 "(or open_via_trigger with a trigger)", primitive=primitive)
     _require_cdp(driver, primitive)
+    _disable_fill_capture(driver)
 
     opened = False
     # (0) optional trigger open — only for combos that truly open on a trigger click.
