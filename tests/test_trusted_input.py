@@ -34,27 +34,24 @@ SETTLE_MS = 500
 
 @pytest.fixture(scope="module")
 def driver():
-    try:
-        import undetected_chromedriver as uc
-    except Exception as exc:  # pragma: no cover
-        pytest.skip(f"undetected_chromedriver unavailable: {exc}")
+    # Match the supported Selenium/CDP backend without UC's unpinned driver
+    # download. The real HTTP journey separately covers the configured adapter.
     import tempfile
-    opts = uc.ChromeOptions()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--window-size=1280,1024")
-    prof = tempfile.mkdtemp(prefix="ti-test-")
-    try:
-        d = uc.Chrome(options=opts, user_data_dir=prof, headless=True, use_subprocess=True)
-    except Exception as exc:  # pragma: no cover
-        pytest.skip(f"could not launch Chrome: {exc}")
-    try:
-        yield d
-    finally:
+    from selenium import webdriver
+    with tempfile.TemporaryDirectory(prefix="ti-isolated-") as profile:
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--window-size=1280,1024")
+        options.add_argument(f"--user-data-dir={profile}")
         try:
-            d.quit()
-        except Exception:
-            pass
+            browser = webdriver.Chrome(options=options)
+        except Exception as error:  # pragma: no cover - external prerequisite
+            pytest.skip(f"Chrome/Selenium driver unavailable: {type(error).__name__}")
+        try:
+            yield browser
+        finally:
+            browser.quit()
 
 
 @pytest.fixture(autouse=True)
@@ -132,7 +129,8 @@ def _select_state(driver, name):
 
 def test_select_option_selects_idless_state_and_verifies_readback(driver):
     out = _select_state(driver, "Florida")
-    assert out["ok"] and out["selected"] == "Florida" and out["verified"] is True
+    assert out["ok"] and out["verified"] is True
+    assert "selected" not in out and "typed" not in out
     assert driver.execute_script("return window.__fixture.selectedStates();") == ["Florida"]
     assert driver.execute_script("return window.__fixture.chipsText();") == "×"
     assert driver.execute_script("return window.__fixture.chipsValues();") == ["Florida"]
@@ -179,7 +177,7 @@ def test_committed_value_readback_rejects_ambiguous_matching_values(driver):
             driver, "div.fr-criteria-editor:not(.x-hide-display)", "Florida", [], 100,
             "test.readback", verify_value_css="input[readonly]")
     assert ei.value.reason == "effect_not_observed"
-    assert ei.value.extra["matching_values"] == ["Florida", "Florida"]
+    assert "matching_values" not in ei.value.extra
 
 
 def test_select_option_requires_committed_selection_verify_scope(driver):

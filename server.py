@@ -49,6 +49,11 @@ import websocket
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler, http_exception_handler
+from functools import wraps
+from contextvars import copy_context
+import fill_diagnostics as fd
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -1319,7 +1324,8 @@ class PlaywrightDriverManager:
         if self._closed:
             raise RuntimeError("Playwright session is closed")
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
-        self._tasks.put((func, result))
+        context = copy_context()
+        self._tasks.put((lambda: context.run(func), result))
         ok, payload = result.get(timeout=120)
         if ok:
             return payload
@@ -2070,6 +2076,53 @@ async def lifespan(app: FastAPI):
 _server_start_time = datetime.now()
 app = FastAPI(title="Scraper Bot", version=VERSION, lifespan=lifespan)
 
+
+def _fill_primitive(path):
+    if path.endswith("/input/type"):
+        return "trusted.type"
+    if path.endswith("/input/select_option"):
+        return "trusted.select_option"
+    if path.startswith("/sessions/") and path.endswith("/type"):
+        return "legacy.type"
+    return None
+
+
+@app.exception_handler(RequestValidationError)
+async def confidential_validation_error(request, error):
+    primitive = _fill_primitive(request.url.path)
+    if primitive:
+        return JSONResponse(status_code=422, content={"detail": fd.error_detail("bad_request", primitive)})
+    return await request_validation_exception_handler(request, error)
+
+
+@app.exception_handler(HTTPException)
+async def confidential_http_error(request, error):
+    primitive = _fill_primitive(request.url.path)
+    if primitive:
+        detail = error.detail if isinstance(error.detail, dict) else {}
+        return JSONResponse(status_code=error.status_code,
+                            content={"detail": fd.error_detail(detail.get("reason", "error"), primitive)})
+    return await http_exception_handler(request, error)
+
+
+def fill_endpoint(primitive):
+    """Include session lookup/lock and capture guards in the safe endpoint boundary."""
+    def decorate(fn):
+        @wraps(fn)
+        def invoke(*args, **kwargs):
+            with fd.confidential_logs():
+                try:
+                    return fn(*args, **kwargs)
+                except HTTPException as error:
+                    status = error.status_code
+                    detail = error.detail if isinstance(error.detail, dict) else {}
+                    detail = fd.error_detail(detail.get("reason", "error"), primitive)
+                except Exception:
+                    status, detail = 400, fd.error_detail(primitive=primitive)
+            raise HTTPException(status_code=status, detail=detail) from None
+        return invoke
+    return decorate
+
 # ---------------------------------------------------------------------------
 # Request-ID middleware
 # ---------------------------------------------------------------------------
@@ -2283,6 +2336,23 @@ def _run_trusted(sess, fn, *args, **kwargs):
         sess.last_error = str(e)
         sess.error_count += 1
         raise HTTPException(status_code=400, detail={"ok": False, "reason": "error", "message": str(e)})
+
+
+def _run_fill(sess, dm, fn, *args, primitive="trusted.type", **kwargs):
+    def operation():
+        if (getattr(sess, "trace_path", None) or getattr(dm, "trace_path", None)
+                or getattr(dm, "_network_enabled", False)):
+            raise ti.TrustedInputError("bad_request", fd.MESSAGES["bad_request"], primitive=primitive)
+        return fn(*args, **kwargs)
+    try:
+        result = ti.run_confidential_fill(operation, diagnostic_primitive=primitive)
+        _touch_action(sess)
+        return result
+    except ti.TrustedInputError as error:
+        detail = fd.error_detail(error.reason, error.primitive)
+        sess.last_error = f"{detail['primitive']}/{detail['reason']}: {detail['message']}"
+        sess.error_count += 1
+    raise HTTPException(status_code=_TI_STATUS.get(detail["reason"], 400), detail=detail) from None
 
 
 class BrowserDownloadTracker:
@@ -3077,9 +3147,11 @@ def click(session_id: str, req: ClickRequest):
 
 
 @app.post("/sessions/{session_id}/type")
+@fill_endpoint("legacy.type")
 def type_text(session_id: str, req: TypeRequest):
     with _session_action(session_id) as (sess, dm):
-        try:
+        def operation():
+            ti._disable_fill_capture(dm.driver)
             el = _find_element(dm, xpath=req.xpath, css=req.css, id_=req.id)
             if req.clear_first:
                 el.clear()
@@ -3087,14 +3159,8 @@ def type_text(session_id: str, req: TypeRequest):
             if req.press_enter:
                 from selenium.webdriver.common.keys import Keys
                 el.send_keys(Keys.RETURN)
-            _touch_action(sess)
             return {"status": "typed"}
-        except HTTPException:
-            raise
-        except Exception as e:
-            sess.last_error = str(e)
-            sess.error_count += 1
-            raise HTTPException(status_code=400, detail=str(e))
+        return _run_fill(sess, dm, operation, primitive="legacy.type")
 
 
 @app.post("/sessions/{session_id}/upload")
@@ -3171,10 +3237,11 @@ def execute_js(session_id: str, req: ExecuteJsRequest):
 # ---------------------------------------------------------------------------
 
 @app.post("/sessions/{session_id}/input/type")
+@fill_endpoint("trusted.type")
 def input_type(session_id: str, req: TrustedTypeRequest):
     with _session_action(session_id) as (sess, dm):
-        return _run_trusted(
-            sess, ti.type_text, dm.driver, text=req.text, css=req.css, xpath=req.xpath,
+        return _run_fill(
+            sess, dm, ti.type_text, dm.driver, text=req.text, css=req.css, xpath=req.xpath,
             locate_text=req.locate_text, scope_css=req.scope_css, scope_xpath=req.scope_xpath,
             exact=req.exact, index=req.index, mode=req.mode, focus=req.focus,
             require_focus=req.require_focus, clear_first=req.clear_first, press_enter=req.press_enter,
@@ -3203,10 +3270,11 @@ def input_click_point(session_id: str, req: ClickPointRequest):
 
 
 @app.post("/sessions/{session_id}/input/select_option")
+@fill_endpoint("trusted.select_option")
 def input_select_option(session_id: str, req: SelectOptionRequest):
     with _session_action(session_id) as (sess, dm):
-        return _run_trusted(
-            sess, ti.select_option, dm.driver, input_css=req.input_css, input_xpath=req.input_xpath,
+        return _run_fill(
+            sess, dm, ti.select_option, dm.driver, primitive="trusted.select_option", input_css=req.input_css, input_xpath=req.input_xpath,
             item_text=req.item_text, item_index=req.item_index, item_scope_css=req.item_scope_css,
             item_scope_xpath=req.item_scope_xpath, item_tag=req.item_tag, item_exact=req.item_exact,
             type_value=req.type_value, clear_first=req.clear_first, type_mode=req.type_mode,

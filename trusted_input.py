@@ -46,6 +46,8 @@ of devicePixelRatio.
 from __future__ import annotations
 
 import time
+from functools import wraps
+import fill_diagnostics as fd
 import uuid
 from typing import Any, Optional
 
@@ -78,6 +80,38 @@ class TrustedInputError(Exception):
         d = {"ok": False, "reason": self.reason, "message": self.message, "primitive": self.primitive}
         d.update(self.extra)
         return d
+
+
+def run_confidential_fill(fn, *args, diagnostic_primitive="trusted.type", **kwargs):
+    """The common fill boundary: safe success/error metadata and no raw chain."""
+    with fd.confidential_logs():
+        try:
+            return fd.success_detail(fn(*args, **kwargs), diagnostic_primitive)
+        except TrustedInputError as error:
+            detail = fd.error_detail(error.reason, error.primitive or diagnostic_primitive)
+        except Exception:
+            detail = fd.error_detail(primitive=diagnostic_primitive)
+    # Raise outside the handler: do not retain the raw exception as __context__.
+    raise TrustedInputError(detail["reason"], detail["message"], primitive=detail["primitive"]) from None
+
+
+def confidential_fill(primitive):
+    def decorate(fn):
+        @wraps(fn)
+        def invoke(*args, **kwargs):
+            chosen = fd.error_detail(primitive=kwargs.get("primitive", primitive))["primitive"]
+            kwargs["primitive"] = chosen
+            return run_confidential_fill(fn, *args, diagnostic_primitive=chosen, **kwargs)
+        return invoke
+    return decorate
+
+
+def _disable_fill_capture(driver):
+    # Selenium adapters enable performance/Network logging at session creation.
+    # Stop future automatic URL/body events BEFORE editing; never read the log.
+    cdp = getattr(driver, "execute_cdp_cmd", None)
+    if callable(cdp):
+        cdp("Network.disable", {})
 
 
 # ---------------------------------------------------------------------------
@@ -324,8 +358,8 @@ def _verify(driver, expect: Optional[dict], timeout_ms: int, primitive: str):
             pass
         time.sleep(0.1)
     raise TrustedInputError("effect_not_observed",
-                            f"action dispatched but post-condition {expect!r} not observed within {timeout_ms}ms",
-                            primitive=primitive, expect=expect)
+                            "action dispatched but post-condition was not observed",
+                            primitive=primitive)
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +429,7 @@ def click(driver, *, by: str = "css", css: str = None, xpath: str = None, text: 
 # type — TRUSTED keystroke / insertText typing (the headline primitive)
 # ---------------------------------------------------------------------------
 
+@confidential_fill("trusted.type")
 def type_text(driver, *, text: str, css: str = None, xpath: str = None, locate_text: str = None,
               scope_css: str = None, scope_xpath: str = None, exact: bool = False, index: int = 0,
               mode: str = "keystroke", focus: bool = True, require_focus: bool = False,
@@ -420,6 +455,7 @@ def type_text(driver, *, text: str, css: str = None, xpath: str = None, locate_t
     even when typing worked — pass an explicit ``expect`` or ``verify=False`` there.
     """
     _require_cdp(driver, primitive)
+    _disable_fill_capture(driver)
     if not text and not clear_first and not press_enter:
         raise TrustedInputError("bad_request", "nothing to type", primitive=primitive)
 
@@ -499,8 +535,8 @@ def type_text(driver, *, text: str, css: str = None, xpath: str = None, locate_t
                 "var e=arguments[0];return e.isContentEditable?(e.textContent||''):(e.value||'');", el)
             if text not in (got or ""):
                 raise TrustedInputError("effect_not_observed",
-                                        f"typed {text!r} but field value is {got!r}",
-                                        primitive=primitive, value=got)
+                                        "typed input did not match field readback",
+                                        primitive=primitive)
             verified = True
         return {"ok": True, "primitive": primitive, "mode": mode, "target": res.get("target"),
                 "verified": verified, "focus_warning": res.get("focus_warning")}
@@ -624,7 +660,7 @@ def _readback_contains(readback, needle: str, primitive: str) -> bool:
             raise TrustedInputError(
                 "effect_not_observed",
                 "selection read-back is ambiguous: more than one committed value matches",
-                primitive=primitive, matching_values=matching,
+                primitive=primitive,
             )
         return len(matching) == 1
     return needle in str(readback or "").lower()
@@ -665,12 +701,11 @@ def _verify_readback(driver, scope_css: str, text: str, before, timeout_ms: int,
         time.sleep(0.1)
     raise TrustedInputError(
         "effect_not_observed",
-        f"selection not confirmed on read-back: scope {scope_css!r} never committed {text!r} "
-        f"(before={before!r}, after={cur!r})",
-        primitive=primitive, scope=scope_css, value_css=verify_value_css,
-        before=before, after=cur)
+        "selection was not confirmed on committed readback",
+        primitive=primitive)
 
 
+@confidential_fill("trusted.select_option")
 def select_option(driver, *, input_css: str = None, input_xpath: str = None,
                   item_text: str = None, item_index: int = None,
                   item_scope_css: str = None, item_scope_xpath: str = None,
@@ -790,8 +825,7 @@ def select_option(driver, *, input_css: str = None, input_xpath: str = None,
     vtext = verify_text if verify_text is not None else item_text
     verified = _verify_readback(driver, verify_scope_css, vtext, before, verify_timeout_ms, primitive,
                                 verify_value_css=verify_value_css)
-    return {"ok": True, "primitive": primitive, "selected": picked, "typed": typed,
-            "opened": opened, "verified": verified}
+    return {"ok": True, "primitive": primitive, "opened": opened, "verified": verified}
 
 
 # ---------------------------------------------------------------------------
