@@ -35,10 +35,10 @@ def test_chrome_major_version_uses_max_version_folder(monkeypatch):
     versions = {
         r"C:\Program Files\Google\Chrome\Application": ["148.0.1.1"],
         r"C:\Program Files (x86)\Google\Chrome\Application": ["149.0.7827.201"],
-        r"C:\Users\vamsh\AppData\Local\Google\Chrome\Application": ["147.0.1.1", "150.0.2.2"],
+        r"C:\synthetic-profile\AppData\Local\Google\Chrome\Application": ["147.0.1.1", "150.0.2.2"],
     }
 
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\vamsh\AppData\Local")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\synthetic-profile\AppData\Local")
     monkeypatch.setattr(platform_windows.os.path, "isdir", lambda path: path in versions)
     monkeypatch.setattr(platform_windows.os, "listdir", lambda path: versions[path])
 
