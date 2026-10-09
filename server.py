@@ -3492,7 +3492,11 @@ def get_cookies(session_id: str):
 @app.post("/sessions/{session_id}/network/enable")
 def enable_network(session_id: str):
     with _session_action(session_id) as (_, dm):
+        cdp = getattr(dm.driver, "execute_cdp_cmd", None)
+        if callable(cdp):
+            cdp("Network.enable", {})
         dm.enable_network_logging()
+        dm._network_enabled = True
         return {"status": "network_logging_enabled"}
 
 

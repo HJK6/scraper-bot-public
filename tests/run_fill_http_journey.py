@@ -85,6 +85,17 @@ def main():
                                              'success_safe': value not in str(success)})
                 time.sleep(.2)
                 receipt['automatic_query_capture_absent'] = requests.get(bot.base+f'/synthetic-capture-check/{session}', timeout=10).json()['automatic_query_capture_absent']
+                # Explicit recording must resume on every adapter, then refuse new fills.
+                bot._post(f'/sessions/{session}/network/enable')
+                bot.execute(session, 'fetch(arguments[0]);return true;', [bot.base+'/synthetic-capture?value=nonsecret-probe'])
+                time.sleep(.2)
+                receipt['explicit_capture_resumes'] = not requests.get(bot.base+f'/synthetic-capture-check/{session}', timeout=10).json()['automatic_query_capture_absent']
+                try:
+                    bot.trusted_type(session, 'synthetic-private-capture', css='#plain')
+                except api.ScraperBotInputError as error:
+                    receipt['enabled_capture_refuses_fill'] = error.reason == 'bad_request' and error.status_code == 400
+                else:
+                    receipt['enabled_capture_refuses_fill'] = False
                 # Read only our synthetic session, never any production session/log.
                 metadata = requests.get(bot.base+f'/sessions/{session}', timeout=10).json()
                 receipt['session_diagnostic_safe'] = all(v not in str(metadata.get('last_error')) for _, v in SAMPLES)
@@ -103,7 +114,7 @@ def main():
                     process.wait(timeout=5)
                 receipt['server_stopped'] = process.poll() is not None
             passed = all(all(v for k,v in case.items() if k!='class') for case in receipt['cases'])
-            passed = passed and receipt['automatic_query_capture_absent']
+            passed = passed and receipt['automatic_query_capture_absent'] and receipt['enabled_capture_refuses_fill'] and receipt['explicit_capture_resumes']
             passed = passed and len(receipt['cases']) == 4 and receipt.get('session_diagnostic_safe') and receipt.get('logs_safe')
             passed = passed and receipt['owned_sessions_closed'] == 1 and receipt['server_stopped']
             receipt['result'] = 'GREEN' if passed else 'RED'

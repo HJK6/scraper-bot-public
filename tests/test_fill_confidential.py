@@ -307,3 +307,18 @@ def test_client_debug_logs_and_raw_server_boundary(endpoint, monkeypatch, caplog
         bot.trusted_type('synthetic', value, css='#synthetic')
     assert caught.value.__context__ is None
     assert_safe(caplog.text, value, READBACK)
+
+
+def test_explicit_network_enable_tracks_all_adapters_and_refuses_fill(endpoint):
+    tc, _sess, field, dm = endpoint
+    methods = []
+    field.execute_cdp_cmd = lambda method, params: methods.append(method)
+    # Adapters may enable CDP recording without their own flag.
+    dm.enable_network_logging = lambda: None
+    enabled = tc.post('/sessions/synthetic/network/enable')
+    assert enabled.status_code == 200
+    response = tc.post('/sessions/synthetic/input/type', json={'text': 'synthetic-private', 'css': '#synthetic', 'mode': 'send_keys'})
+    assert response.status_code == 400
+    assert response.json()['detail']['reason'] == 'bad_request'
+    assert 'Network.enable' in methods
+    assert field.sent is None
