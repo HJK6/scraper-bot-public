@@ -47,6 +47,7 @@ import uuid
 from typing import Any, Callable, Optional
 
 import requests
+import fill_diagnostics as fd
 from platform_base import get_adapter
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -237,6 +238,10 @@ class ScraperBot:
     def _input_post(self, path: str, body: dict) -> dict:
         """POST to an /input/* primitive, raising ScraperBotInputError (with the
         structured reason) on a refusal so callers can attribute failures."""
+        if path.endswith("/input/type"):
+            return self._fill_post(path, body, "trusted.type")
+        if path.endswith("/input/select_option"):
+            return self._fill_post(path, body, "trusted.select_option")
         url = self._url(path)
         try:
             resp = self._session.post(url, json=body, headers=self._headers(),
@@ -255,6 +260,40 @@ class ScraperBot:
             raise ScraperBotInputError(detail.get("reason"), detail.get("message", ""),
                                        detail.get("primitive"), detail, resp.status_code)
         self._raise(resp)
+
+    def _fill_post(self, path: str, body: dict, primitive: str) -> dict:
+        with fd.confidential_logs():
+            try:
+                resp = self._session.post(self._url(path), json=body, headers=self._headers(), timeout=(5, 120))
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                error = ScraperBotConnectionError("confidential fill transport failed")
+            except Exception:
+                error = ScraperBotError("confidential fill request failed")
+            else:
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = None
+                if (resp.ok and isinstance(data, dict)
+                        and not any(key in data for key in ("detail", "error", "reason"))
+                        and (data.get("ok") is True or
+                             (primitive == "legacy.type" and "ok" not in data and data.get("status") == "typed"))):
+                    return fd.success_detail(data, primitive)
+                status = resp.status_code
+                detail = data.get("detail") if isinstance(data, dict) else None
+                detail = fd.error_detail(detail.get("reason") if isinstance(detail, dict) else "error",
+                                         fd.safe_primitive(detail.get("primitive"), primitive) if isinstance(detail, dict) else primitive)
+                if status == 404:
+                    error = ScraperBotSessionLost("confidential fill session not found (404)")
+                elif status in (502, 503, 504):
+                    error = ScraperBotConnectionError("confidential fill service unavailable")
+                elif status >= 500:
+                    error = ScraperBotServerError("confidential fill server failed")
+                else:
+                    error = ScraperBotInputError(detail["reason"], detail["message"],
+                                                 detail["primitive"], detail, status)
+        # Outside all exception handlers: no raw transport/JSON exception chain.
+        raise error from None
 
     # -- Session management --
 
@@ -393,10 +432,10 @@ class ScraperBot:
 
     def type(self, session_id: str, text: str, xpath: str = None, css: str = None,
              id: str = None, clear_first: bool = False, press_enter: bool = False) -> dict:
-        return self._post(f"/sessions/{session_id}/type", {
+        return self._fill_post(f"/sessions/{session_id}/type", {
             "xpath": xpath, "css": css, "id": id,
             "text": text, "clear_first": clear_first, "press_enter": press_enter,
-        })
+        }, "legacy.type")
 
     def upload(self, session_id: str, file_path: str, *, css: str = None, xpath: str = None) -> dict:
         if bool(css) == bool(xpath):

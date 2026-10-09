@@ -18,27 +18,24 @@ FIXTURE_URL = (pathlib.Path(__file__).resolve().parent / "fixtures" / "trusted_i
 
 @pytest.fixture(scope="module")
 def driver():
-    try:
-        import undetected_chromedriver as uc
-    except Exception as exc:  # pragma: no cover
-        pytest.skip(f"undetected_chromedriver unavailable: {exc}")
+    # Match the supported Selenium/CDP backend without UC's unpinned driver
+    # download. The real HTTP journey separately covers the configured adapter.
     import tempfile
-    opts = uc.ChromeOptions()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--window-size=1280,1024")
-    prof = tempfile.mkdtemp(prefix="ti-ep-")
-    try:
-        d = uc.Chrome(options=opts, user_data_dir=prof, headless=True, use_subprocess=True)
-    except Exception as exc:  # pragma: no cover
-        pytest.skip(f"could not launch Chrome: {exc}")
-    try:
-        yield d
-    finally:
+    from selenium import webdriver
+    with tempfile.TemporaryDirectory(prefix="ti-isolated-") as profile:
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--window-size=1280,1024")
+        options.add_argument(f"--user-data-dir={profile}")
         try:
-            d.quit()
-        except Exception:
-            pass
+            browser = webdriver.Chrome(options=options)
+        except Exception as error:  # pragma: no cover - external prerequisite
+            pytest.skip(f"Chrome/Selenium driver unavailable: {type(error).__name__}")
+        try:
+            yield browser
+        finally:
+            browser.quit()
 
 
 @pytest.fixture

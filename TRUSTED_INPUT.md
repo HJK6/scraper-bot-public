@@ -5,7 +5,7 @@ capabilities the existing `/click`, `/type` and `/execute` cannot provide, drive
 evidence from the PropStream and PropertyRadar automation failures.
 
 They are **added alongside** the existing endpoints — `execute_js`, `click`, `type`
-are unchanged.
+retain their interaction behavior. Fill diagnostics follow the confidentiality rules below.
 
 ## What was actually broken (and what wasn't)
 
@@ -32,7 +32,7 @@ are unchanged.
 
 Every response — success or failure — records **which primitive ran** (`primitive`).
 On refusal the client raises `ScraperBotInputError` with a structured `reason`,
-the full `detail`, and the originating HTTP status (`status_code`, with stable
+the structured `detail` (content-free for fills), and the originating HTTP status (`status_code`, with stable
 `status` alias):
 
 | reason | meaning | attribute to |
@@ -147,3 +147,39 @@ coordinate clicks need CDP. A non-CDP backend fails loudly with `backend_unsuppo
 browser). The browser tests skip cleanly where Chrome is unavailable. The fixture
 `tests/fixtures/trusted_input_fixture.html` reproduces both defects faithfully: a
 react-select value-tracker, an id-less ExtJS combo, and a click-intercepting overlay.
+
+
+## Confidential fill diagnostics
+
+Every value passed to `type`, `trusted_type`, or `select_option` is confidential by
+default. No flag is required. The shared fill boundary returns only stable reason,
+primitive, HTTP status, fixed messages and non-content success flags. It omits
+submitted/readback/expectation values, target/cover descriptions, and selected or
+typed strings. Verification still detects mismatches, unconfirmed focus and
+missing or ambiguous committed selections; a safe error never means success.
+Legacy `type` retains its existing send-keys behavior without adding verification.
+
+Raw browser/transport exceptions and validation bodies are replaced with safe
+errors. Client errors also protect against older or malformed server responses;
+unknown reason/primitive strings and nested detail are discarded. Fill-scoped
+library DEBUG records omit request/readback/exception content. When distributing
+`client.py` separately, include `fill_diagnostics.py` beside it.
+
+Fills refuse before dispatch on a session with automatic tracing or enabled
+network recording, including URL/query recording. Create an untraced session for
+confidential fills. CDP fills disable default Network/performance event recording
+before editing; they never collect buffered logs. A later explicit network-enable
+request may resume capture, so use it only with suitable data. The fill contract
+covers `/type`, `/input/type` and the entire `/input/select_option` operation.
+Explicit screenshots, HTML, JavaScript/debugger reads, the `prove_trusted` key
+probe and native `/select` are separate APIs and retain their existing behavior.
+Browser state may hold input values; these rules protect fill diagnostics.
+
+Focused validation: `python -m pytest tests/test_fill_confidential.py -q`.
+Actual isolated HTTP/client/Chrome validation:
+`python tests/run_fill_http_journey.py`. It uses a synthetic truncating form,
+temporary data/profile and its own server with global maintenance disabled;
+its receipt must show four safe mismatch/success cases, absent automatic query
+capture and complete owned-session/server cleanup. Use the supported Python and
+provisioned browser dependencies. No real credentials, cards or profiles belong
+in these checks.
